@@ -3,6 +3,7 @@ export interface ExtractionResponse {
     text: string;
     numPages: number;
     info: any;
+    chunks?: { text: string; embedding: number[] }[];
 }
 
 export const extractPDF = async (file: File): Promise<ExtractionResponse> => {
