@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { QdrantVectorStore } from '@langchain/qdrant';
-import { EmbeddingService } from './embedding.service';
+import { EmbeddingService } from './3-embeddings.service';
 
 /**
  * LLD Principle Applied: Repository Pattern & Single Responsibility Principle.
