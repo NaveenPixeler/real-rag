@@ -1,64 +1,59 @@
-import { Injectable, BadRequestException } from '@nestjs/common';
-import { PDFParse } from 'pdf-parse';
-import { RecursiveCharacterTextSplitter } from '@langchain/textsplitters';
-import { GoogleGenerativeAIEmbeddings } from '@langchain/google-genai';
+import { Injectable } from '@nestjs/common';
+import { PdfExtractorService } from './1-text-extraction.service';
+import { TextSplitterService } from './2-chunking.service';
+import { EmbeddingService } from './3-embeddings.service';
+import { QdrantService } from './4-vector-db-storage.service';
 
+/**
+ * LLD Principle Applied: Facade Pattern & Orchestrator
+ *
+ * Reason: This service no longer handles the gritty details of parsing PDFs,
+ * fragmenting strings, or dealing with Qdrant APIs. Instead, it provides a 
+ * simple Facade to the controller: `extractText(file)`. Inside, it acts as an 
+ * orchestrator, coordinating the flow of data between our highly-specialized
+ * micro-services.
+ */
 @Injectable()
 export class DocumentService {
+    constructor(
+        private readonly pdfExtractor: PdfExtractorService,
+        private readonly textSplitter: TextSplitterService,
+        private readonly embeddingService: EmbeddingService,
+        private readonly qdrantService: QdrantService,
+    ) {}
+
     async extractText(file: Express.Multer.File) {
-        if (!file) {
-            throw new BadRequestException('No file uploaded');
-        }
-        if (file.mimetype !== 'application/pdf') {
-            throw new BadRequestException('Uploaded file is not a PDF');
-        }
+        // 1. Extract raw text and metadata (SRP)
+        const extraction = await this.pdfExtractor.extract(file);
 
-        const parser = new PDFParse({ data: file.buffer });
-        try {
-            const infoResult = await parser.getInfo();
-            const textResult = await parser.getText();
+        // 2. Chunk the text (SRP)
+        const chunks = await this.textSplitter.split(extraction.text);
 
-            // Clean up the text a bit before chunking
-            const cleanText = textResult.text.replace(/\n+/g, '\n').trim();
+        // 3. Generate embeddings (Adapter Pattern)
+        const embeddedVectors = await this.embeddingService.generateEmbeddings(chunks);
 
-            const chunks = await this.chunkText(cleanText);
+        // 4. Create metadata array for Qdrant
+        const metadatas = chunks.map((_, index) => ({
+            source: file.originalname,
+            chunkIndex: index,
+        }));
 
-            // Initialize Gemini Embeddings
-            const embeddings = new GoogleGenerativeAIEmbeddings({
-                apiKey: process.env.GEMINI_API_KEY,
-                model: "gemini-embedding-001",
-            });
+        // 5. Store in Vector DB (Repository Pattern)
+        await this.qdrantService.storeVectors(chunks, embeddedVectors, metadatas, this.embeddingService);
 
-            // Generate embeddings for the chunks
-            const embeddedVectors = await embeddings.embedDocuments(chunks);
+        // Map chunks to their embeddings for the UI response
+        const chunksWithEmbeddings = chunks.map((chunk, index) => ({
+            text: chunk,
+            embedding: embeddedVectors[index],
+            metadata: metadatas[index],
+        }));
 
-            // Map chunks to their embeddings
-            const chunksWithEmbeddings = chunks.map((chunk, index) => ({
-                text: chunk,
-                embedding: embeddedVectors[index],
-            }));
-
-            return {
-                text: cleanText,
-                numPages: infoResult.total,
-                info: infoResult.info,
-                chunks: chunksWithEmbeddings,
-            };
-        } catch (error) {
-            console.error('PDF Parse error:', error);
-            throw new BadRequestException('Failed to parse PDF file');
-        } finally {
-            await parser.destroy();
-        }
-    }
-
-    private async chunkText(text: string): Promise<string[]> {
-        const splitter = new RecursiveCharacterTextSplitter({
-            chunkSize: 1000,
-            chunkOverlap: 200,
-        });
-
-        const docs = await splitter.createDocuments([text]);
-        return docs.map((doc: any) => doc.pageContent);
+        return {
+            text: extraction.text,
+            numPages: extraction.numPages,
+            info: extraction.info,
+            chunksStored: chunks.length,
+            chunks: chunksWithEmbeddings,
+        };
     }
 }
